@@ -1,7 +1,68 @@
 import os
 import csv
-from functions.generate_documentos import process_pdf_to_images_and_csv, get_pdf_name_without_extension
-from functions.extraer_datos import process_document_ocr
+import fitz  # PyMuPDF
+from pdf2image import convert_from_path
+import pytesseract
+from PIL import Image
+from functions.extraer_datos import (
+    extract_first_folio_token, 
+    extract_rut_from_text,
+    extract_fecha_from_text,
+    extract_nombre_from_q1,
+    ocr_text_from_region
+)
+
+def procesar_primera_pagina_pdf(pdf_path):
+    """
+    Procesa solo la primera página de un PDF y extrae sus datos
+    Retorna un diccionario con los datos extraídos
+    """
+    try:
+        # Convertir primera página a imagen
+        images = convert_from_path(pdf_path, first_page=1, last_page=1)
+        if not images:
+            return None
+        
+        primera_pagina = images[0]
+        
+        # Realizar OCR en la página completa
+        ocr_page_text = pytesseract.image_to_string(primera_pagina, lang="spa+eng")
+        
+        # Extraer folio
+        folio = extract_first_folio_token(ocr_page_text)
+        
+        # Si hay folio, extraer los demás datos
+        datos = {
+            'folio': '',
+            'fecha': '',
+            'rut': '',
+            'nombre': '',
+            'estado': ''
+        }
+        
+        if folio:
+            # Convertir PIL Image a array temporal para poder usar ocr_text_from_region
+            temp_img_path = "temp_page.jpg"
+            primera_pagina.save(temp_img_path)
+            
+            # Extraer texto de regiones específicas
+            q1_text = ocr_text_from_region(temp_img_path, (0, 0, 515, 190))
+            q2_text = ocr_text_from_region(temp_img_path, (1154, 0, 10**9, 174))
+            
+            # Eliminar imagen temporal
+            os.remove(temp_img_path)
+            
+            # Extraer datos
+            datos['folio'] = folio
+            datos['rut'] = extract_rut_from_text(q1_text)
+            datos['fecha'] = extract_fecha_from_text(q2_text)
+            datos['nombre'] = extract_nombre_from_q1(q1_text, datos['rut'])
+            
+        return datos
+        
+    except Exception as e:
+        print(f"Error procesando PDF: {str(e)}")
+        return None
 
 def procesar_directorio_pdfs(directorio_entrada):
     """
@@ -12,10 +73,6 @@ def procesar_directorio_pdfs(directorio_entrada):
         print(f"❌ Error: El directorio {directorio_entrada} no existe")
         return False
 
-    # Crear directorios necesarios si no existen
-    os.makedirs('input', exist_ok=True)
-    os.makedirs('documentos', exist_ok=True)
-
     # Obtener lista de PDFs en el directorio
     pdfs = [f for f in os.listdir(directorio_entrada) if f.lower().endswith('.pdf')]
     
@@ -24,47 +81,43 @@ def procesar_directorio_pdfs(directorio_entrada):
         return False
 
     resultados = []
+    total_pdfs = len(pdfs)
 
-    for pdf in pdfs:
+    print(f"🔍 Procesando {total_pdfs} archivos PDF...")
+
+    for i, pdf in enumerate(pdfs, 1):
         try:
-            print(f"\n🔄 Procesando: {pdf}")
+            print(f"\n📄 Procesando {pdf} ({i}/{total_pdfs})...")
+            pdf_path = os.path.join(directorio_entrada, pdf)
             
-            # Copiar PDF a carpeta input
-            pdf_origen = os.path.join(directorio_entrada, pdf)
-            pdf_destino = os.path.join('input', pdf)
+            # Procesar primera página del PDF
+            datos = procesar_primera_pagina_pdf(pdf_path)
             
-            if os.path.exists(pdf_destino):
-                os.remove(pdf_destino)  # Eliminar si ya existe
-            
-            with open(pdf_origen, 'rb') as src, open(pdf_destino, 'wb') as dst:
-                dst.write(src.read())
-
-            # Obtener nombre sin extensión
-            pdf_name = get_pdf_name_without_extension(pdf)
-            
-            # Procesar PDF a imágenes y crear estructura inicial
-            if process_pdf_to_images_and_csv(pdf_destino, pdf_name):
-                # Extraer datos con OCR
-                if process_document_ocr(pdf_name):
-                    # Leer datos extraídos
-                    csv_path = os.path.join('documentos', pdf_name, f"{pdf_name}.csv")
-                    with open(csv_path, 'r', encoding='utf-8') as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            resultados.append({
-                                'nombre_pdf': pdf,
-                                'path_pdf': pdf_origen,
-                                'folio': row.get('folio', ''),
-                                'fecha': row.get('fecha', ''),
-                                'rut': row.get('rut', ''),
-                                'nombre': row.get('nombre', ''),
-                                'estado': row.get('estado', '')
-                            })
+            if datos:
+                datos['nombre_pdf'] = pdf
+                datos['path_pdf'] = pdf_path
+                resultados.append(datos)
+                print(f"✅ Datos extraídos exitosamente:")
+                print(f"   📎 Folio: {datos['folio']}")
+                print(f"   🆔 RUT: {datos['rut']}")
+                print(f"   📅 Fecha: {datos['fecha']}")
+                print(f"   👤 Nombre: {datos['nombre'][:50]}{'...' if len(datos['nombre'])>50 else ''}")
+            else:
+                print(f"⚠️ No se pudieron extraer datos de {pdf}")
+                resultados.append({
+                    'nombre_pdf': pdf,
+                    'path_pdf': pdf_path,
+                    'folio': '',
+                    'fecha': '',
+                    'rut': '',
+                    'nombre': '',
+                    'estado': ''
+                })
 
         except Exception as e:
             print(f"❌ Error procesando {pdf}: {str(e)}")
 
-    # Generar CSV con todos los resultados
+    # Generar CSV con los resultados
     if resultados:
         output_csv = 'resultados_pdfs.csv'
         fieldnames = ['nombre_pdf', 'path_pdf', 'folio', 'fecha', 'rut', 'nombre', 'estado']
@@ -75,7 +128,7 @@ def procesar_directorio_pdfs(directorio_entrada):
             writer.writerows(resultados)
         
         print(f"\n✅ Proceso completado. Se generó el archivo: {output_csv}")
-        print(f"📊 Total de registros procesados: {len(resultados)}")
+        print(f"📊 Total de documentos procesados: {len(resultados)}")
         return True
     
     return False
