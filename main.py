@@ -1,9 +1,10 @@
 import os
 import csv
 import fitz  # PyMuPDF
-from pdf2image import convert_from_path
 import pytesseract
 from PIL import Image
+import io
+import numpy as np
 from functions.extraer_datos import (
     extract_first_folio_token, 
     extract_rut_from_text,
@@ -12,6 +13,34 @@ from functions.extraer_datos import (
     ocr_text_from_region
 )
 
+def pdf_primera_pagina_a_imagen(pdf_path):
+    """
+    Convierte la primera página de un PDF a imagen usando PyMuPDF
+    Retorna una imagen PIL
+    """
+    try:
+        # Abrir PDF con PyMuPDF
+        doc = fitz.open(pdf_path)
+        if doc.page_count < 1:
+            return None
+        
+        # Obtener primera página
+        page = doc[0]
+        
+        # Convertir a imagen con resolución aumentada para mejor OCR
+        pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72))
+        
+        # Convertir a imagen PIL
+        img_data = pix.tobytes("png")
+        img = Image.open(io.BytesIO(img_data))
+        
+        doc.close()
+        return img
+        
+    except Exception as e:
+        print(f"Error convirtiendo PDF a imagen: {str(e)}")
+        return None
+
 def procesar_primera_pagina_pdf(pdf_path):
     """
     Procesa solo la primera página de un PDF y extrae sus datos
@@ -19,11 +48,9 @@ def procesar_primera_pagina_pdf(pdf_path):
     """
     try:
         # Convertir primera página a imagen
-        images = convert_from_path(pdf_path, first_page=1, last_page=1)
-        if not images:
+        primera_pagina = pdf_primera_pagina_a_imagen(pdf_path)
+        if primera_pagina is None:
             return None
-        
-        primera_pagina = images[0]
         
         # Realizar OCR en la página completa
         ocr_page_text = pytesseract.image_to_string(primera_pagina, lang="spa+eng")
@@ -41,7 +68,7 @@ def procesar_primera_pagina_pdf(pdf_path):
         }
         
         if folio:
-            # Convertir PIL Image a array temporal para poder usar ocr_text_from_region
+            # Convertir PIL Image a archivo temporal para poder usar ocr_text_from_region
             temp_img_path = "temp_page.jpg"
             primera_pagina.save(temp_img_path)
             
